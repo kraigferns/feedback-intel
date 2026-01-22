@@ -158,6 +158,64 @@ async function importFromSheets(env: Env): Promise<{ imported: number; sources: 
 }
 
 // ============================================
+// AI ASSISTANT
+// ============================================
+async function answerQuestion(env: Env, question: string): Promise<string> {
+  try {
+    // Step 1: Generate SQL query from natural language
+    const sqlPrompt = `You are a SQLite expert. Convert this question into a SQLite query for a 'feedback' table.
+
+Table schema:
+- id, source (values: 'support', 'discord', 'github', 'twitter'), content, author, customer_tier (values: 'enterprise', 'pro', 'free')
+- sentiment (values: 'positive', 'negative', 'neutral'), sentiment_score (REAL), urgency (values: 'critical', 'high', 'medium', 'low')
+- themes (TEXT containing JSON like '["pricing","features"]'), summary, priority_score (REAL), arr_estimate (INTEGER), created_at (TEXT ISO timestamp)
+
+IMPORTANT SQLite rules:
+- Use strftime() for date operations, NOT EXTRACT()
+- Use LIKE for JSON searching, NOT @> operator (e.g., themes LIKE '%pricing%')
+- Use datetime('now') for current time
+- created_at is TEXT in ISO format like '2026-01-20T10:30:00.000Z'
+- When grouping or comparing, return ALL relevant rows (use LIMIT 10-20, NOT LIMIT 1)
+- For questions about "which" or "what", return multiple results to show the full picture
+
+Question: "${question}"
+
+Reply with ONLY the SQLite query, no explanation, no markdown. Use WHERE, GROUP BY, ORDER BY as needed. Return enough rows to answer comprehensively (LIMIT 10-20 for aggregate queries).`;
+
+    const sqlResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+      messages: [{ role: "user", content: sqlPrompt }]
+    });
+    
+    let sql = ((sqlResponse as any).response || '').trim();
+    // Clean up the SQL - remove markdown code blocks if present
+    sql = sql.replace(/```sql\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    console.log('Generated SQL:', sql);
+
+    // Step 2: Execute the query
+    const results = await env.DB.prepare(sql).all();
+    
+    // Step 3: Format results into natural language
+    const answerPrompt = `Based on this data, answer the user's question in 2-3 sentences.
+
+User question: "${question}"
+
+Data: ${JSON.stringify(results.results?.slice(0, 20))}
+
+Reply with a natural, conversational answer.`;
+
+    const answerResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+      messages: [{ role: "user", content: answerPrompt }]
+    });
+
+    return ((answerResponse as any).response || 'Unable to generate answer').trim();
+  } catch (error: any) {
+    console.error('AI Assistant error:', error);
+    return `I encountered an error processing your question: ${error.message}`;
+  }
+}
+
+// ============================================
 // HTTP HANDLER
 // ============================================
 export default {
@@ -212,6 +270,15 @@ export default {
         return Response.json({ stats, bySource: bySource.results, byTier: byTier.results, topThemes, severityDist: severityDist.results, highPriority: highPriority.results, arrAtRisk: (arrAtRisk as any)?.total || 0 }, { headers: cors });
       }
 
+      // NEW: AI Assistant endpoint
+      if (path === "/api/ask" && req.method === "POST") {
+        const body = await req.json() as any;
+        const question = body.question;
+        if (!question) return Response.json({ error: "Question required" }, { status: 400, headers: cors });
+        const answer = await answerQuestion(env, question);
+        return Response.json({ question, answer }, { headers: cors });
+      }
+
       if (path === "/api/clear" && req.method === "POST") { await env.DB.prepare('DELETE FROM feedback').run(); return Response.json({ success: true }, { headers: cors }); }
 
       return Response.json({ error: "Not found" }, { status: 404, headers: cors });
@@ -225,7 +292,7 @@ export default {
 };
 
 // ============================================
-// CLEAN UI
+// CLEAN UI WITH AI CHAT
 // ============================================
 function getHTML(env: Env) {
   const configured = !!(env.SPREADSHEET_ID && env.SHEETS_API_KEY);
@@ -249,6 +316,22 @@ header{display:flex;justify-content:space-between;align-items:center;margin-bott
 .btn-primary:hover{background:#ea580c}
 .btn-ghost{background:transparent;color:#888;border:1px solid #333}
 .btn-ghost:hover{background:#222;color:#fff}
+
+/* AI Chat Box */
+.chat-box{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #3b82f6;border-radius:12px;padding:20px;margin-bottom:24px}
+.chat-title{font-size:14px;font-weight:500;color:#93c5fd;margin-bottom:12px}
+.chat-input-row{display:flex;gap:8px}
+.chat-input{flex:1;background:#0a0a0a;border:1px solid #333;color:#fff;padding:10px 14px;border-radius:8px;font-size:13px;font-family:inherit}
+.chat-input:focus{outline:none;border-color:#3b82f6}
+.chat-input::placeholder{color:#555}
+.chat-send{background:#3b82f6;color:#fff;border:none;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s}
+.chat-send:hover{background:#2563eb}
+.chat-send:disabled{opacity:0.5;cursor:not-allowed}
+.chat-response{background:#00000033;border-radius:8px;padding:12px;margin-top:12px;font-size:13px;line-height:1.6;color:#cbd5e1;display:none}
+.chat-response.show{display:block}
+.chat-example{font-size:11px;color:#64748b;margin-top:8px}
+.chat-example button{background:transparent;border:1px solid #334155;color:#94a3b8;padding:4px 8px;border-radius:4px;font-size:10px;cursor:pointer;margin-right:6px;margin-top:4px}
+.chat-example button:hover{background:#1e293b;border-color:#475569}
 
 /* Alert Banner */
 .alert{background:#1c1c1c;border:1px solid #333;border-radius:12px;padding:16px 20px;margin-bottom:24px;display:flex;align-items:center;gap:12px}
@@ -295,7 +378,9 @@ header{display:flex;justify-content:space-between;align-items:center;margin-bott
 .badge.twitter{background:#1d9bf0;color:#fff}
 
 /* Insights Box */
-.insights{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #e9456033;border-radius:12px;padding:20px;margin-bottom:24px}
+.insights-section{margin-bottom:24px}
+.insights-header{font-size:16px;font-weight:600;color:#fff;margin-bottom:12px}
+.insights{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #e9456033;border-radius:12px;padding:20px}
 .insight{background:#00000033;border-radius:8px;padding:12px;margin-bottom:8px}
 .insight:last-child{margin-bottom:0}
 .insight-header{display:flex;align-items:center;gap:8px;margin-bottom:4px}
@@ -358,7 +443,27 @@ header{display:flex;justify-content:space-between;align-items:center;margin-bott
   ${configured?`<div class="alert success"><span class="alert-icon">✓</span><span class="alert-text"><strong>Connected to Google Sheets</strong> — Auto-import daily at 9am UTC</span></div>`
   :`<div class="alert"><span class="alert-icon">⚙</span><span class="alert-text">Set <strong>SPREADSHEET_ID</strong> and <strong>SHEETS_API_KEY</strong> to enable import</span></div>`}
 
-  <div class="insights" id="insights"><div class="loading">Analyzing feedback...</div></div>
+  <!-- AI CHAT BOX -->
+  <div class="chat-box">
+    <div class="chat-title">Ask about your feedback</div>
+    <div class="chat-input-row">
+      <input type="text" class="chat-input" id="chatInput" placeholder="e.g., What are users saying about pricing this week?" onkeypress="if(event.key==='Enter')askQuestion()">
+      <button class="chat-send" id="chatSend" onclick="askQuestion()">Ask</button>
+    </div>
+    <div class="chat-response" id="chatResponse"></div>
+    <div class="chat-example">
+      Try: 
+      <button onclick="askExample('What are users saying about pricing this week?')">Pricing feedback</button>
+      <button onclick="askExample('Show me all critical bugs from enterprise customers')">Critical bugs</button>
+      <button onclick="askExample('Which channel has the most negative sentiment?')">Channel sentiment</button>
+    </div>
+  </div>
+
+  <!-- INSIGHTS SECTION -->
+  <div class="insights-section">
+    <div class="insights-header">Key Insights & Actions</div>
+    <div class="insights" id="insights"><div class="loading">Analyzing feedback...</div></div>
+  </div>
 
   <div class="stats" id="stats">
     <div class="stat"><div class="stat-label">Total</div><div class="stat-value">—</div></div>
@@ -412,6 +517,40 @@ let data=null;
 const $=s=>document.querySelector(s);
 const toast=(m,t='success')=>{const e=$('#toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',3000)};
 const fmt=n=>n>=1000?'$'+(n/1000).toFixed(0)+'K':'$'+n;
+
+// AI Chat Functions
+async function askQuestion(){
+  const input=$('#chatInput');
+  const btn=$('#chatSend');
+  const response=$('#chatResponse');
+  const question=input.value.trim();
+  if(!question)return;
+  
+  btn.disabled=true;
+  btn.textContent='...';
+  response.className='chat-response show';
+  response.textContent='Thinking...';
+  
+  try{
+    const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question})});
+    const d=await r.json();
+    if(d.error){
+      response.textContent='Error: '+d.error;
+    }else{
+      response.textContent=d.answer;
+    }
+  }catch(e){
+    response.textContent='Failed to get answer: '+e.message;
+  }finally{
+    btn.disabled=false;
+    btn.textContent='Ask';
+  }
+}
+
+function askExample(q){
+  $('#chatInput').value=q;
+  askQuestion();
+}
 
 async function loadInsights(){
   try{
