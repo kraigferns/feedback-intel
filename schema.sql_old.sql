@@ -1,4 +1,3 @@
--- Drop existing table if exists (for clean restart)
 DROP TABLE IF EXISTS feedback;
 
 CREATE TABLE feedback (
@@ -8,16 +7,13 @@ CREATE TABLE feedback (
   content_hash TEXT,
   author TEXT,
   customer_tier TEXT DEFAULT 'free',
-  arr_estimate INTEGER DEFAULT 0,
   created_at TEXT NOT NULL,
   
-  -- AI-enriched fields
   sentiment TEXT,
   sentiment_score REAL,
   urgency TEXT,
   themes TEXT,
   summary TEXT,
-  priority_score REAL,
   processed_at TEXT
 );
 
@@ -25,6 +21,4 @@ CREATE INDEX idx_source ON feedback(source);
 CREATE INDEX idx_urgency ON feedback(urgency);
 CREATE INDEX idx_sentiment ON feedback(sentiment);
 CREATE INDEX idx_created ON feedback(created_at);
-CREATE INDEX idx_priority ON feedback(priority_score);
-CREATE INDEX idx_tier ON feedback(customer_tier);
 CREATE UNIQUE INDEX idx_content_hash ON feedback(content_hash);
